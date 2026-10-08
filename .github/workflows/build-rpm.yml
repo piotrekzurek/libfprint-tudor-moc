@@ -1,10 +1,7 @@
 name: build-rpm
 
-# Build the patched libfprint RPM for every currently supported Fedora release.
-# The version matrix is auto-detected from the Fedora repository metadata, so a
-# new Fedora release is picked up without editing this file: the "discover"
-# job asks the Fedora mirror infrastructure which versions exist, and the build
-# matrix is generated from that answer.
+# Build the patched libfprint RPM for currently supported Fedora releases.
+# Currently builds for Fedora 44 and rawhide.
 
 on:
   push:
@@ -21,49 +18,16 @@ permissions:
   contents: read
 
 jobs:
-  discover:
-    name: Discover supported Fedora versions
-    runs-on: ubuntu-latest
-    outputs:
-      versions: ${{ steps.detect.outputs.versions }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Detect supported Fedora releases from the official mirror index
-        id: detect
-        run: |
-          set -euo pipefail
-          # The directory listing under the "releases" mirror path contains one
-          # entry per published Fedora release. Filter out anything that is not
-          # a plain version number (rawhide, devel, archives, ...) and keep only
-          # currently supported releases (not EOL). As of 2026, supported are 40, 41.
-          # We also explicitly add 'rawhide' for the development branch.
-          url="https://download.fedoraproject.org/pub/fedora/linux/releases/"
-          body="$(curl -fsSL "$url")"
-          # Extract version numbers from directory listings, keep only numeric dirs
-          versions="$(printf '%s' "$body" \
-            | grep -oE '>[0-9]+/?<' \
-            | tr -d '></' \
-            | sort -n -u \
-            | grep -E '^(40|41)$' \
-            | paste -sd, -)"
-          # Always add rawhide for development testing
-          versions="${versions},rawhide"
-          if [ -z "$versions" ]; then
-            echo "Could not detect Fedora versions from $url" >&2
-            exit 1
-          fi
-          echo "Detected Fedora versions: $versions"
-          echo "versions=$versions" >> "$GITHUB_OUTPUT"
-
   build:
     name: libfprint RPM (Fedora ${{ matrix.version }})
-    needs: discover
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJson(needs.discover.outputs.versions) }}
+        version: ['44', 'rawhide']
+    outputs:
+      fedora-version: ${{ steps.detect.outputs.version }}
+      rpm-path: ${{ steps.build.outputs.rpm-path }}
     container:
       image: fedora:${{ matrix.version }}
       options: --privileged -v /var/run/docker.sock:/var/run/docker.sock
@@ -93,6 +57,19 @@ jobs:
             cpio \
             findutils
 
+      - name: Detect Fedora version
+        id: detect
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.version }}" == "rawhide" ]]; then
+            # For rawhide, get the actual development version
+            FEDORA_VER=$(dnf -q repoquery --qf '%{version}' --whatprovides fedora-release | head -1 | cut -d. -f1)
+          else
+            FEDORA_VER="${{ matrix.version }}"
+          fi
+          echo "version=$FEDORA_VER" >> "$GITHUB_OUTPUT"
+          echo "Detected Fedora version: $FEDORA_VER"
+
       - name: Fetch existing libfprint NEVRA for this Fedora
         id: nevra
         run: |
@@ -101,26 +78,31 @@ jobs:
           echo "libfprint=$v" >> "$GITHUB_OUTPUT"
 
       - name: Build RPM
+        id: build
         env:
           OUT: ${{ github.workspace }}/out
-        run: ./scripts/build-rpm.sh
+        run: |
+          ./scripts/build-rpm.sh
+          # Find and output the built RPM path
+          rpm_path=$(find "$OUT/dist" -name "libfprint-*.x86_64.rpm" -print -quit)
+          echo "rpm-path=$rpm_path" >> "$GITHUB_OUTPUT"
 
       - name: Package artifacts
         run: |
           mkdir -p dist
           cp out/dist/*.rpm dist/ 2>/dev/null || cp "$GITHUB_WORKSPACE"/dist/*.rpm dist/ || true
-          ls -l dist
+          ls -lh dist
 
       - name: Upload RPM
         uses: actions/upload-artifact@v4
         with:
-          name: libfprint-tudormoc-fc${{ matrix.version }}
+          name: libfprint-tudormoc-fc${{ steps.detect.outputs.version }}
           path: dist/*.rpm
           if-no-files-found: error
 
   release:
     name: Publish release assets
-    needs: [discover, build]
+    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -129,6 +111,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f -name "*.rpm" | sort
 
       - name: Attach RPMs to the release
         uses: softprops/action-gh-release@v2
