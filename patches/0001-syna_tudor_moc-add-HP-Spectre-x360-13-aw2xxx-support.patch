@@ -1,0 +1,697 @@
+diff --git a/libfprint/drivers/syna_tudor_moc/X b/libfprint/drivers/syna_tudor_moc/X
+--- a/libfprint/drivers/syna_tudor_moc/communication.c	2026-10-05 01:48:13.507995633 +0200
++++ b/libfprint/drivers/syna_tudor_moc/communication.c	2026-10-05 01:00:51.640092038 +0200
+@@ -1846,6 +1846,9 @@
+        fpi_byte_reader_get_data(&reader, CERTIFICATE_SIZE, &sensor_cert_bytes);
+    READ_OK_CHECK_ASYNC(self->task_ssm, read_ok);
+ 
++
++
++
+    if (!parse_certificate(recv_host_cert_bytes, CERTIFICATE_SIZE,
+                           &self->pairing_data.host_cert)) {
+       error = set_and_report_error(FP_DEVICE_ERROR_PROTO,
+@@ -1861,6 +1864,13 @@
+ 
+    if (self->pairing_data.private_key_initialized) {
+       self->pairing_data.present = TRUE;
++      self->pairing_pending = FALSE;
++
++      GError *error = NULL;
++      if (!store_pairing_data(self, &error)) {
++         fp_warn("Failed to store pairing data: %s", error->message);
++         g_clear_error(&error);
++      }
+    } else {
+       error = set_and_report_error(
+           FP_DEVICE_ERROR_GENERAL,
+diff -ru fprint-synaptics/upstream-base/communication.h fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/communication.h
+--- a/libfprint/drivers/syna_tudor_moc/communication.h	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/communication.h	2026-10-03 15:15:35.163230553 +0200
+@@ -246,4 +246,6 @@
+ void send_bootloader_mode_enter_exit(FpiDeviceSynaTudorMoc *self,
+                                      gboolean enter);
+ 
++gboolean store_pairing_data(FpiDeviceSynaTudorMoc *self, GError **error);
++
+ void send_db2_cleanup(FpiDeviceSynaTudorMoc *self);
+diff -ru fprint-synaptics/upstream-base/device.h fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/device.h
+--- a/libfprint/drivers/syna_tudor_moc/device.h	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/device.h	2026-10-05 01:00:51.640553921 +0200
+@@ -237,6 +237,7 @@
+    cert_t sensor_cert;
+    cert_t host_cert;
+ 
++
+    gboolean private_key_initialized;
+    gnutls_privkey_t private_key;
+ } pairing_data_t;
+@@ -368,4 +369,11 @@
+    tls_t tls;         /* TLS session things */
+    storage_t storage; /* sensor storage */
+    events_t events;
++
++   /* Pending persistent data from property set */
++   GVariant *pairing_data_pending;
++
++   /* TRUE while the sensor is being paired; open() must not advance past
++    * OPEN_STATE_LOAD_PAIRING_DATA until recv_pair() resumes it. */
++   gboolean pairing_pending;
+ };
+diff -ru fprint-synaptics/upstream-base/sensor_keys.h fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/sensor_keys.h
+--- a/libfprint/drivers/syna_tudor_moc/sensor_keys.h	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/sensor_keys.h	2026-10-04 15:43:54.760302555 +0200
+@@ -40,13 +40,13 @@
+ } sensor_pub_key_t;
+ 
+ static guint8 pubkey_v10_1_x[ECC_KEY_SIZE] = {
+-    0xcb, 0x65, 0x62, 0x93, 0xb9, 0x70, 0x18, 0x06, 0xae, 0x3b, 0x1a,
+-    0x52, 0x08, 0xe4, 0x69, 0xf4, 0x65, 0xa6, 0xa5, 0x19, 0x5b, 0xd8,
+-    0xb7, 0xe3, 0x9f, 0x23, 0x65, 0x06, 0x11, 0xdc, 0xdf, 0xdc};
++    0x33, 0xd6, 0x20, 0x8c, 0xa5, 0xf5, 0xda, 0x82, 0x4b, 0x46, 0xea,
++    0x1c, 0xa2, 0x5e, 0x67, 0x32, 0x7e, 0xfc, 0x0c, 0x4c, 0xe9, 0x37,
++    0xd9, 0xd8, 0x44, 0x12, 0x0d, 0x6c, 0xc0, 0x8b, 0xfe, 0x5d};
+ static guint8 pubkey_v10_1_y[ECC_KEY_SIZE] = {
+-    0xa7, 0x00, 0x42, 0x4e, 0xe0, 0x97, 0xb3, 0xc1, 0x59, 0xbe, 0x79,
+-    0x10, 0x89, 0x50, 0x2f, 0x40, 0xba, 0x57, 0x1e, 0xca, 0x91, 0xb1,
+-    0x06, 0xb4, 0x88, 0x1f, 0x19, 0x63, 0x7e, 0x44, 0xbf, 0xdc};
++    0xb9, 0x55, 0xe1, 0x81, 0xfc, 0x4b, 0xf6, 0xc6, 0x2b, 0x91, 0xaf,
++    0xcd, 0xf3, 0xb6, 0x1e, 0xc7, 0x18, 0xdc, 0xe7, 0x08, 0x47, 0x42,
++    0xc4, 0x1f, 0x57, 0xc1, 0xf0, 0x77, 0x7c, 0x34, 0xa0, 0xfd};
+ sensor_pub_key_t pubkey_v10_1 = {
+     .x = (gnutls_datum_t){.data = pubkey_v10_1_x, .size = ECC_KEY_SIZE},
+     .y = (gnutls_datum_t){.data = pubkey_v10_1_y, .size = ECC_KEY_SIZE},
+@@ -56,17 +56,34 @@
+ };
+ 
+ static guint8 pubkey_v10_1_kf_x[ECC_KEY_SIZE] = {
++    0xcb, 0x65, 0x62, 0x93, 0xb9, 0x70, 0x18, 0x06, 0xae, 0x3b, 0x1a,
++    0x52, 0x08, 0xe4, 0x69, 0xf4, 0x65, 0xa6, 0xa5, 0x19, 0x5b, 0xd8,
++    0xb7, 0xe3, 0x9f, 0x23, 0x65, 0x06, 0x11, 0xdc, 0xdf, 0xdc};
++static guint8 pubkey_v10_1_kf_y[ECC_KEY_SIZE] = {
++    0xa7, 0x00, 0x42, 0x4e, 0xe0, 0x97, 0xb3, 0xc1, 0x59, 0xbe, 0x79,
++    0x10, 0x89, 0x50, 0x2f, 0x40, 0xba, 0x57, 0x1e, 0xca, 0x91, 0xb1,
++    0x06, 0xb4, 0x88, 0x1f, 0x19, 0x63, 0x7e, 0x44, 0xbf, 0xdc};
++sensor_pub_key_t pubkey_v10_1_kf = {
++    .x = (gnutls_datum_t){.data = pubkey_v10_1_kf_x, .size = ECC_KEY_SIZE},
++    .y = (gnutls_datum_t){.data = pubkey_v10_1_kf_y, .size = ECC_KEY_SIZE},
++    .fw_version_major = 10,
++    .fw_version_minor = 1,
++    .keyflag = TRUE,
++};
++
++/* Product 0x41 (65) - Version 10.1, key_flag=FALSE - correct key from 10.1.tsk */
++static guint8 pubkey_v10_1_p41_x[ECC_KEY_SIZE] = {
+     0x33, 0xd6, 0x20, 0x8c, 0xa5, 0xf5, 0xda, 0x82, 0x4b, 0x46, 0xea,
+     0x1c, 0xa2, 0x5e, 0x67, 0x32, 0x7e, 0xfc, 0x0c, 0x4c, 0xe9, 0x37,
+     0xd9, 0xd8, 0x44, 0x12, 0x0d, 0x6c, 0xc0, 0x8b, 0xfe, 0x5d};
+-static guint8 pubkey_v10_1_kf_y[ECC_KEY_SIZE] = {
++static guint8 pubkey_v10_1_p41_y[ECC_KEY_SIZE] = {
+     0xb9, 0x55, 0xe1, 0x81, 0xfc, 0x4b, 0xf6, 0xc6, 0x2b, 0x91, 0xaf,
+     0xcd, 0xf3, 0xb6, 0x1e, 0xc7, 0x18, 0xdc, 0xe7, 0x08, 0x47, 0x42,
+     0xc4, 0x1f, 0x57, 0xc1, 0xf0, 0x77, 0x7c, 0x34, 0xa0, 0xfd};
+-sensor_pub_key_t pubkey_v10_1_kf = {
+-    .x = (gnutls_datum_t){.data = pubkey_v10_1_kf_x, .size = ECC_KEY_SIZE},
+-    .y = (gnutls_datum_t){.data = pubkey_v10_1_kf_y, .size = ECC_KEY_SIZE},
++sensor_pub_key_t pubkey_v10_1_p41 = {
++    .x = (gnutls_datum_t){.data = pubkey_v10_1_p41_x, .size = ECC_KEY_SIZE},
++    .y = (gnutls_datum_t){.data = pubkey_v10_1_p41_y, .size = ECC_KEY_SIZE},
+     .fw_version_major = 10,
+     .fw_version_minor = 1,
+-    .keyflag = TRUE,
++    .keyflag = FALSE,
+ };
+diff -ru fprint-synaptics/upstream-base/syna_tudor_moc.c fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/syna_tudor_moc.c
+--- a/libfprint/drivers/syna_tudor_moc/syna_tudor_moc.c	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/syna_tudor_moc.c	2026-10-05 01:45:21.031299908 +0200
+@@ -25,6 +25,24 @@
+ /* WARN: current implementation starts a new TLS session on each device open */
+ 
+ #include "syna_tudor_moc.h"
++
++#include <glib.h>
++
++/* Set FP_SYNATUDOR_DEBUG=1 to re-enable the verbose reverse-engineering traces
++ * (key dumps, certificate hex, pairing internals). They are gated rather than
++ * removed so that protocol work stays reproducible. */
++#define SYNATUDOR_DBG(fmt, ...)                                           \
++   G_STMT_START {                                                          \
++      if (syna_tudor_debug)                                                \
++        fp_warn ("[syna] " fmt, ##__VA_ARGS__);                            \
++   } G_STMT_END
++
++static gboolean syna_tudor_debug;
++static void
++syna_tudor_debug_init (void)
++{
++  syna_tudor_debug = g_getenv ("FP_SYNATUDOR_DEBUG") != NULL;
++}
+ #include "communication.c"
+ #include "device.h"
+ #include "fpi-log.h"
+@@ -33,14 +51,21 @@
+ #include <gnutls/abstract.h>
+ #include <gnutls/gnutls.h>
+ 
+-/* Needed for testing with libfprint examples they do not support storage of
+- * pairing data */
+-#define USE_SAMPLE_PAIRING_DATA
++/* The vendored sample pairing data is a Windows capture from a different
++ * sensor. Its certificate does not verify against this device's HS key, so
++ * real pairing is mandatory. */
++/* #define USE_SAMPLE_PAIRING_DATA */
+ 
+ static db2_id_t cache_template_id = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                      0xff, 0xff, 0xff, 0xff};
+ 
++typedef enum {
++  PROP_0,
++  PROP_PERSISTENT_DATA,
++  N_PROPERTIES,
++} SynapticsTudorMocProperty;
++
+ G_DEFINE_TYPE(FpiDeviceSynaTudorMoc, fpi_device_syna_tudor_moc, FP_TYPE_DEVICE)
+ 
+ // clang-format off
+@@ -118,7 +143,24 @@
+    return ret;
+ }
+ 
+-static gboolean store_pairing_data(FpiDeviceSynaTudorMoc *self, GError **error)
++/* Stock fprintd has no notion of the fpi-persistent-data property (upstream
++ * carries fprintd-load-store-persistent-data-from-device.patch for that), so
++ * the pairing would be thrown away on every daemon restart. Persist it here
++ * instead, next to fprintd's own storage, keyed by sensor serial. */
++static char *
++pairing_data_path(FpiDeviceSynaTudorMoc *self)
++{
++   g_autofree char *hex = g_strdup ("");
++   for (gsize i = 0; i < sizeof (self->mis_version.serial_number); i++)
++     {
++       g_autofree char *b = g_strdup_printf ("%02x",
++                                             self->mis_version.serial_number[i]);
++       hex = g_strconcat (hex, b, NULL);
++     }
++   return g_strdup_printf ("/var/lib/fprint/syna_tudor_moc-%s.pdata", hex);
++}
++
++gboolean store_pairing_data(FpiDeviceSynaTudorMoc *self, GError **error)
+ {
+    gboolean ret = TRUE;
+ 
+@@ -158,9 +200,31 @@
+ 
+    g_object_set(FP_DEVICE(self), "fpi-persistent-data", pairing_data, NULL);
+ 
+-   fp_dbg("Pairing data store success");
++   /* Also persist to disk in an explicit, fixed layout. A serialised
++    * GVariant tuple does not round-trip reliably here, and stock fprintd
++    * does not carry the property across restarts anyway. */
++   {
++     gsize total = 4 + 4 + 2 * CERTIFICATE_SIZE + 3 * 32;
++     g_autofree guint8 *buf = g_malloc0 (total);
++     guint32 curve_le = (guint32) curve;
++     memcpy (buf, "STM1", 4);
++     memcpy (buf + 4, &curve_le, 4);
++     memcpy (buf + 8, &self->pairing_data.host_cert, CERTIFICATE_SIZE);
++     memcpy (buf + 8 + CERTIFICATE_SIZE, &self->pairing_data.sensor_cert,
++             CERTIFICATE_SIZE);
++     memcpy (buf + 8 + 2 * CERTIFICATE_SIZE, x.data, 32);
++     memcpy (buf + 8 + 2 * CERTIFICATE_SIZE + 32, y.data, 32);
++     memcpy (buf + 8 + 2 * CERTIFICATE_SIZE + 64, k.data, 32);
++
++     g_autofree char *path = pairing_data_path (self);
++     g_autoptr (GError) werr = NULL;
++     if (!g_file_set_contents (path, (const char *) buf, total, &werr))
++       fp_warn ("Failed to write %s: %s", path, werr->message);
++     else
++       fp_dbg ("Pairing data written to %s", path);
++   }
+ 
+-   fp_dbg("Pairing data:");
++   SYNATUDOR_DBG("Pairing data:");
+    fp_dbg("\tSensor certificate:");
+    fp_dbg_large_hex((guint8 *)&self->pairing_data.sensor_cert,
+                     CERTIFICATE_SIZE);
+@@ -186,6 +250,54 @@
+    return ret;
+ }
+ 
++/* Fetch pairing data: the fpi-persistent-data property first, then our own
++ * on-disk copy (stock fprintd does not persist that property). */
++static GVariant *
++get_stored_pairing_data(FpiDeviceSynaTudorMoc *self)
++{
++   g_autoptr(GVariant) pairing_data = NULL;
++
++   g_object_get (FP_DEVICE (self), "fpi-persistent-data", &pairing_data, NULL);
++   if (pairing_data != NULL)
++     return g_steal_pointer (&pairing_data);
++
++   g_autofree char *path = pairing_data_path (self);
++   g_autofree char *contents = NULL;
++   gsize length = 0;
++   if (g_file_get_contents (path, &contents, &length, NULL) && length > 0)
++     {
++       gsize want = 4 + 4 + 2 * CERTIFICATE_SIZE + 3 * 32;
++       if (length != want || memcmp (contents, "STM1", 4) != 0)
++         {
++           fp_warn ("Ignoring malformed pairing data at %s", path);
++           return NULL;
++         }
++
++       guint32 curve_le;
++       memcpy (&curve_le, contents + 4, 4);
++       const guint8 *p = (const guint8 *) contents + 8;
++       GVariant *hc = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, p,
++                                                 CERTIFICATE_SIZE, 1);
++       p += CERTIFICATE_SIZE;
++       GVariant *sc = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, p,
++                                                 CERTIFICATE_SIZE, 1);
++       p += CERTIFICATE_SIZE;
++       GVariant *vx = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, p, 32, 1);
++       p += 32;
++       GVariant *vy = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, p, 32, 1);
++       p += 32;
++       GVariant *vk = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, p, 32, 1);
++
++       fp_dbg ("Loaded pairing data from %s (%zu bytes)", path, length);
++       return g_variant_new ("(@ay@ayu@ay@ay@ay)", hc, sc,
++                             (guint32) curve_le, vx, vy, vk);
++     }
++
++   return NULL;
++}
++
++static gboolean load_pairing_data(FpiDeviceSynaTudorMoc *self, GError **error) __attribute__((used));
++
+ static gboolean load_pairing_data(FpiDeviceSynaTudorMoc *self, GError **error)
+ {
+    gboolean ret = TRUE;
+@@ -210,7 +322,7 @@
+    gnutls_datum_t k = {.data = NULL};
+    gnutls_ecc_curve_t curve = 0;
+ 
+-   g_object_get(FP_DEVICE(self), "fpi-persistent-data", &pairing_data, NULL);
++   pairing_data = get_stored_pairing_data (self);
+ 
+    if (pairing_data == NULL) {
+       *error = set_and_report_error(FP_DEVICE_ERROR_GENERAL,
+@@ -277,7 +389,7 @@
+ 
+    fp_dbg("Pairing data load success");
+ 
+-   fp_dbg("Pairing data:");
++   SYNATUDOR_DBG("Pairing data:");
+    fp_dbg("\tSensor certificate:");
+    fp_dbg_large_hex((guint8 *)&self->pairing_data.sensor_cert,
+                     CERTIFICATE_SIZE);
+@@ -307,26 +419,24 @@
+    }
+ #else
+ 
+-   g_autoptr(GVariant) pairing_data = NULL;
+-   g_object_get(FP_DEVICE(self), "fpi-persistent-data", &pairing_data, NULL);
++   g_autoptr(GVariant) pairing_data = get_stored_pairing_data (self);
+ 
+    guint8 provision_state = self->mis_version.provision_state & 0xF;
+    gboolean need_to_pair = provision_state != PROVISION_STATE_PROVISIONED;
+ 
+    if (need_to_pair || pairing_data == NULL) {
+-      if (pairing_data == NULL) {
+-         fp_warn("Previous pairing data in persistent storage are NULL");
+-      }
++     if (pairing_data == NULL)
++       fp_warn ("Previous pairing data in persistent storage are NULL");
+ 
+       fp_warn("Need to pair sensor");
+ 
++      /* pair() only queues the USB command; the certificates arrive later in
++       * recv_pair, which resumes the open state machine and stores the data. */
+       if (!pair(self, &error)) {
+          goto error;
+       }
+-      if (!store_pairing_data(self, &error)) {
+-         fp_err("Unable to store pairing data");
+-         goto error;
+-      }
++      self->pairing_pending = TRUE;
++      return;
+    } else {
+       if (!load_pairing_data(self, &error)) {
+          fp_err("Unable to load pairing data");
+@@ -403,6 +513,10 @@
+       break;
+    case OPEN_STATE_LOAD_PAIRING_DATA:
+       fetch_pairing_data(self);
++      /* Pairing is asynchronous: recv_pair() resumes this state machine once
++       * the sensor has answered, so do not advance yet. */
++      if (self->pairing_pending)
++        break;
+       fpi_ssm_next_state(ssm);
+       break;
+    case OPEN_STATE_VERIFY_SENSOR_CERTIFICATE:
+@@ -759,19 +873,21 @@
+ {
+    FpiDeviceSynaTudorMoc *self = FPI_DEVICE_SYNA_TUDOR_MOC(device);
+    enroll_ssm_data_t *ssm_data = fpi_ssm_get_data(ssm);
+-   FpPrint *print = NULL;
+ 
++   fp_dbg("<<<<<<<<<<<<<<<<<<<< enroll end <<<<<<<<<<<<<<<<<<<<");
++   self->task_ssm = NULL;
++
++   /* Complete exactly once. Completing on the success path and then falling
++    * through to the error label returned the same GTask twice, which trips
++    * g_task_return_pointer()'s G_IS_TASK assertion and unbalances the FpPrint
++    * reference. */
+    if (error != NULL) {
+-      goto error;
++      fpi_device_enroll_complete(device, NULL, error);
++      return;
+    }
+ 
+-   print = fp_print_from_enrollment(self, &ssm_data->match_enrollment);
+-   fpi_device_enroll_complete(device, g_object_ref(print), NULL);
+-
+-error:
+-   fp_dbg("<<<<<<<<<<<<<<<<<<<< enroll end <<<<<<<<<<<<<<<<<<<<");
+-   self->task_ssm = NULL;
+-   fpi_device_enroll_complete(device, print, error);
++   FpPrint *print = fp_print_from_enrollment(self, &ssm_data->match_enrollment);
++   fpi_device_enroll_complete(device, print, NULL);
+ }
+ 
+ static void enroll(FpDevice *device)
+@@ -1304,9 +1420,53 @@
+ 
+ /* class init ============================================================== */
+ 
++static void
++fpi_device_syna_tudor_moc_set_property(GObject      *object,
++                                       guint         prop_id,
++                                       const GValue *value,
++                                       GParamSpec   *pspec)
++{
++   FpiDeviceSynaTudorMoc *self = FPI_DEVICE_SYNA_TUDOR_MOC(object);
++
++   switch (prop_id) {
++   case PROP_PERSISTENT_DATA:
++      if (self->pairing_data_pending) {
++         g_variant_unref(self->pairing_data_pending);
++      }
++      self->pairing_data_pending = g_value_dup_variant(value);
++      break;
++   default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
++      break;
++   }
++}
++
++static void
++fpi_device_syna_tudor_moc_get_property(GObject    *object,
++                                       guint       prop_id,
++                                       GValue     *value,
++                                       GParamSpec *pspec)
++{
++   FpiDeviceSynaTudorMoc *self = FPI_DEVICE_SYNA_TUDOR_MOC(object);
++
++   switch (prop_id) {
++   case PROP_PERSISTENT_DATA:
++      if (self->pairing_data_pending) {
++         g_value_set_variant(value, self->pairing_data_pending);
++      }
++      break;
++   default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
++      break;
++   }
++}
++
++/* class init ============================================================== */
++
+ static void fpi_device_syna_tudor_moc_init(FpiDeviceSynaTudorMoc *self)
+ {
+-   G_DEBUG_HERE();
++   syna_tudor_debug_init ();
++   self->pairing_data_pending = NULL;
+ }
+ 
+ static void
+@@ -1332,8 +1492,23 @@
+    dev_class->identify = auth;
+    dev_class->list = list;
+    dev_class->delete = delete;
+-   dev_class->clear_storage = clear_storage;
+-   dev_class->cancel = cancel;
++dev_class->clear_storage = clear_storage;
++  dev_class->cancel = cancel;
++
++  GObjectClass *object_class = G_OBJECT_CLASS(dev_class);
++  object_class->set_property = fpi_device_syna_tudor_moc_set_property;
++  object_class->get_property = fpi_device_syna_tudor_moc_get_property;
++
++  /* Register fpi-persistent-data property for persistent pairing data storage */
++  GObjectClass *object_class2 = G_OBJECT_CLASS(dev_class);
++  g_object_class_install_property(object_class2,
++                                  PROP_PERSISTENT_DATA,
++                                  g_param_spec_variant("fpi-persistent-data",
++                                                       "Persistent data",
++                                                       "Persistent pairing data for the sensor",
++                                                       G_VARIANT_TYPE_ANY,
++                                                       NULL,
++                                                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
+-   fpi_device_class_auto_initialize_features(dev_class);
++  fpi_device_class_auto_initialize_features(dev_class);
+ }
+diff -ru fprint-synaptics/upstream-base/tls.c fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/tls.c
+--- a/libfprint/drivers/syna_tudor_moc/tls.c	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/tls.c	2026-10-05 00:55:32.596385148 +0200
+@@ -1175,7 +1175,7 @@
+ #endif
+ 
+    SHA256(self->tls.sent_handshake_msgs, self->tls.sent_handshake_msgs_size,
+-          &sent_messages_hash);
++          sent_messages_hash);
+ 
+ #ifdef TLS_DEBUG
+    fp_dbg("Siging hash:");
+@@ -1894,6 +1894,11 @@
+    gboolean ret = TRUE;
+ 
+    gboolean key_flag = (self->mis_version.security & 0x20) != 0;
++   /* Product 0x41 uses the keyflag=TRUE key despite the security bit being
++    * clear, so treat it as set for the compatibility check as well. */
++   if (self->mis_version.product_id == 0x41)
++      key_flag = TRUE;
++
+    if (sensor_pubkey->keyflag != key_flag) {
+       ret = FALSE;
+       *error = set_and_report_error(FP_DEVICE_ERROR_NOT_SUPPORTED,
+@@ -1929,13 +1934,43 @@
+    /* get sensor public key */
+    pubkey_initialized = TRUE;
+ 
+-   fp_dbg("Sensor certificate verify key_flag: %d", key_flag);
++   SYNATUDOR_DBG("Sensor certificate verify: key_flag=%d, product_id=0x%02x",
++           key_flag, self->mis_version.product_id);
+    sensor_pub_key_t sensor_pub_key;
+-   if (key_flag) {
++   /* Product 0x41 is signed with the 10.1-kf (keyflag=TRUE) key even though the
++    * security bit 0x20 is clear, so it cannot be selected from key_flag alone.
++    * Verified against a live certificate from this device. */
++   if (self->mis_version.product_id == 0x41) {
++      sensor_pub_key = pubkey_v10_1_kf;
++   } else if (key_flag) {
+       sensor_pub_key = pubkey_v10_1_kf;
+    } else {
+       sensor_pub_key = pubkey_v10_1;
+    }
++   SYNATUDOR_DBG("Selected sensor_pub_key: keyflag=%d, fw_ver=%d.%d",
++           sensor_pub_key.keyflag, sensor_pub_key.fw_version_major, sensor_pub_key.fw_version_minor);
++   SYNATUDOR_DBG("  X ptr=%p, size=%zu",
++           sensor_pub_key.x.data, sensor_pub_key.x.size);
++   SYNATUDOR_DBG("  Y ptr=%p, size=%zu",
++           sensor_pub_key.y.data, sensor_pub_key.y.size);
++   SYNATUDOR_DBG("  X data (first 32 bytes):");
++   {
++       char hexbuf[97];
++       for (size_t i = 0; i < sensor_pub_key.x.size && i < 32; i++) {
++           sprintf(hexbuf + i * 3, "%02x ", sensor_pub_key.x.data[i]);
++       }
++       hexbuf[96] = '\0';
++       SYNATUDOR_DBG("%s", hexbuf);
++   }
++   SYNATUDOR_DBG("  Y data (first 32 bytes):");
++   {
++       char hexbuf[97];
++       for (size_t i = 0; i < sensor_pub_key.y.size && i < 32; i++) {
++           sprintf(hexbuf + i * 3, "%02x ", sensor_pub_key.y.data[i]);
++       }
++       hexbuf[96] = '\0';
++       SYNATUDOR_DBG("%s", hexbuf);
++   }
+ 
+    BOOL_CHECK(sensor_pub_key_compatibility_check(self, &sensor_pub_key, error));
+    gnutls_pubkey_init(&pubkey);
+@@ -1945,15 +1980,45 @@
+ 
+    GNUTLS_CHECK(gnutls_pubkey_verify_params(pubkey));
+ 
+-   /* everything up to signature */
++/* The cert_t struct is #pragma pack(1) and its field order matches the packed
++ * wire format exactly (HH68s68sxBH256s), so the first 142 bytes are precisely
++ * what the sensor signed. */
+    gnutls_datum_t data = {.size = CERTIFICATE_SIZE_WITHOUT_SIGNATURE,
+                           .data = (guint8 *)&self->pairing_data.sensor_cert};
+    gnutls_datum_t signature = {.size = self->pairing_data.sensor_cert.sign_size,
+                                .data =
+                                    self->pairing_data.sensor_cert.sign_data};
+ 
+-   GNUTLS_CHECK(gnutls_pubkey_verify_data2(pubkey, GNUTLS_SIGN_ECDSA_SHA256, 0,
+-                                           &data, &signature));
++   SYNATUDOR_DBG("Verify cert: data_size=%zu, sign_size=%u, CERTIFICATE_SIZE_WITHOUT_SIGNATURE=%d",
++           data.size, signature.size, CERTIFICATE_SIZE_WITHOUT_SIGNATURE);
++
++   {
++      static const char h[] = "0123456789abcdef";
++      g_autofree char *hex = g_malloc(data.size * 2 + 1);
++      for (gsize i = 0; i < data.size; i++) {
++        hex[i * 2] = h[data.data[i] >> 4];
++        hex[i * 2 + 1] = h[data.data[i] & 0xf];
++      }
++      hex[data.size * 2] = '\0';
++      SYNATUDOR_DBG("CERTDATA %s", hex);
++   }
++   {
++      static const char h[] = "0123456789abcdef";
++      g_autofree char *hex = g_malloc(signature.size * 2 + 1);
++      for (gsize i = 0; i < signature.size; i++) {
++        hex[i * 2] = h[signature.data[i] >> 4];
++        hex[i * 2 + 1] = h[signature.data[i] & 0xf];
++      }
++      hex[signature.size * 2] = '\0';
++      SYNATUDOR_DBG("CERTSIG %s", hex);
++   }
++
++   /* GnuTLS accepts the sensor's DER-encoded ECDSA signature as-is.
++    * Do not hand-convert it to raw r||s: the leading-zero padding on a
++    * 33-byte INTEGER is easy to get wrong, and GnuTLS handles DER natively. */
++   GNUTLS_CHECK(gnutls_pubkey_verify_data2(pubkey, GNUTLS_SIGN_ECDSA_SHA256,
++                                           0, &data, &signature));
++
+ 
+    fp_dbg("Sensor certificate verify success");
+ 
+@@ -1994,14 +2059,12 @@
+    self->pairing_data.present = FALSE;
+ }
+ 
+-static gboolean sensor_supports_advanced_security(FpiDeviceSynaTudorMoc *self)
++static __attribute__((used)) gboolean sensor_supports_advanced_security(FpiDeviceSynaTudorMoc *self)
+ {
+    return (self->mis_version.security & 0x100) != 0;
+ }
+ 
+-/* Pairing functions ======================================================= */
+-
+-static gboolean generate_hs_priv_key(gnutls_privkey_t *privkey, GError **error)
++static __attribute__((used)) gboolean generate_hs_priv_key(gnutls_privkey_t *privkey, GError **error)
+ {
+    gboolean ret = TRUE;
+    gboolean privkey_initialized = FALSE;
+@@ -2061,7 +2124,7 @@
+    return ret;
+ }
+ 
+-static gboolean create_host_certificate(FpiDeviceSynaTudorMoc *self,
++__attribute__((used)) gboolean create_host_certificate(FpiDeviceSynaTudorMoc *self,
+                                         guint8 *host_certificate,
+                                         GError **error)
+ {
+@@ -2147,41 +2210,44 @@
+    return ret;
+ }
+ 
+-void pair(FpiDeviceSynaTudorMoc *self)
++__attribute__((used)) gboolean pair(FpiDeviceSynaTudorMoc *self, GError **error)
+ {
++   gboolean ret = TRUE;
+    g_autofree guint8 *host_certificate = g_malloc(CERTIFICATE_SIZE);
+ 
+    if (self->mis_version.provision_state != PROVISION_STATE_PROVISIONED) {
+-      fp_warn("Skipping pairing: sensor is already paired or insecure");
+-      return;
++      fp_warn("Skipping pairing: sensor is not provisioned");
++      return FALSE;
+    }
+ 
+    if (!sensor_supports_advanced_security(self)) {
+       fp_warn("Skipping pairing: only advanced security is supported (per "
+               "Windows driver)");
+-      return;
++      return FALSE;
+    }
+ 
+    fp_dbg("Pairing sensor");
+ 
+    /* Create keypair */
+-   GNUTLS_CHECK_ASYNC(self->task_ssm,
+-                      gnutls_privkey_init(&self->pairing_data.private_key));
++   GNUTLS_CHECK(gnutls_privkey_init(&self->pairing_data.private_key));
+    self->pairing_data.private_key_initialized = TRUE;
+-   GNUTLS_CHECK_ASYNC(self->task_ssm,
+-                      gnutls_privkey_generate(
+-                          self->pairing_data.private_key, GNUTLS_PK_ECDSA,
+-                          GNUTLS_CURVE_TO_BITS(GNUTLS_ECC_CURVE_SECP256R1), 0));
++   GNUTLS_CHECK(gnutls_privkey_generate(
++                      self->pairing_data.private_key, GNUTLS_PK_ECDSA,
++                      GNUTLS_CURVE_TO_BITS(GNUTLS_ECC_CURVE_SECP256R1), 0));
+ 
+    /* we create it already serialized, as we do not need it in struct form */
+-   GError *error = NULL;
+-   if (!create_host_certificate(self, host_certificate, &error)) {
+-      fpi_ssm_mark_failed(self->task_ssm, error);
+-      return;
++   GError *err = NULL;
++   if (!create_host_certificate(self, host_certificate, &err)) {
++      fpi_ssm_mark_failed(self->task_ssm, err);
++      return FALSE;
+    }
+ 
+    /* saves received certificates to self */
+    send_pair(self, host_certificate);
++   return TRUE;
++
++error:
++   return FALSE;
+ }
+ 
+ /* async ==================================================================== */
+@@ -2228,7 +2294,8 @@
+ 
+    fpi_usb_transfer_fill_control(
+        self->cmd_transfer, G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
+-       G_USB_DEVICE_REQUEST_TYPE_VENDOR, G_USB_DEVICE_RECIPIENT_DEVICE,
++       G_USB_DEVICE_REQUEST_TYPE_VENDOR,
++       G_USB_DEVICE_RECIPIENT_DEVICE,
+        REQUEST_TLS_SESSION_STATUS, 0, 0, TLS_SESSION_STATUS_DATA_RESP_LEN);
+ 
+    self->cmd_transfer->short_is_error = TRUE;
+diff -ru fprint-synaptics/upstream-base/tls.h fprint-synaptics/libfprint/libfprint/drivers/syna_tudor_moc/tls.h
+--- a/libfprint/drivers/syna_tudor_moc/tls.h	2026-10-05 01:48:13.508047539 +0200
++++ b/libfprint/drivers/syna_tudor_moc/tls.h	2026-10-03 22:54:04.197565776 +0200
+@@ -129,7 +129,11 @@
+ 
+ void free_pairing_data(FpiDeviceSynaTudorMoc *self);
+ 
+-void pair(FpiDeviceSynaTudorMoc *self);
++gboolean pair(FpiDeviceSynaTudorMoc *self, GError **error);
++
++gboolean create_host_certificate(FpiDeviceSynaTudorMoc *self,
++                                 guint8 *host_certificate,
++                                 GError **error);
+ 
+ gboolean parse_certificate(const guint8 *data, const gsize len, cert_t *cert);
+ 

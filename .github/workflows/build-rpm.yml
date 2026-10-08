@@ -1,0 +1,133 @@
+name: build-rpm
+
+# Build the patched libfprint RPM for every currently supported Fedora release.
+# The version matrix is auto-detected from the Fedora repository metadata, so a
+# new Fedora release is picked up without editing this file: the "discover"
+# job asks the Fedora mirror infrastructure which versions exist, and the build
+# matrix is generated from that answer.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Rebuild weekly so that a Fedora point release that breaks the build is
+    # noticed, and so freshly released Fedora versions get picked up quickly.
+    - cron: '0 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover supported Fedora versions
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Fedora releases from the official mirror index
+        id: detect
+        run: |
+          set -euo pipefail
+          # The directory listing under the "releases" mirror path contains one
+          # entry per published Fedora release. Filter out anything that is not
+          # a plain version number (rawhide, devel, archives, ...) and keep the
+          # last few, which are the supported ones.
+          url="https://download.fedoraproject.org/pub/fedora/linux/releases/"
+          body="$(curl -fsSL "$url")"
+          versions="$(printf '%s' "$body" \
+            | grep -oE '>[0-9]+/?<' \
+            | tr -d '></' \
+            | sort -n -u \
+            | tail -n 2 \
+            | paste -sd, -)"
+          if [ -z "$versions" ]; then
+            echo "Could not detect Fedora versions from $url" >&2
+            exit 1
+          fi
+          echo "Detected Fedora versions: $versions"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: libfprint RPM (Fedora ${{ matrix.version }})
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.discover.outputs.versions) }}
+    container:
+      image: fedora:${{ matrix.version }}
+      options: --privileged -v /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            dnf-plugins-core \
+            gcc \
+            gcc-c++ \
+            git \
+            meson \
+            ninja-build \
+            pkgconf-pkg-config \
+            rpm-build \
+            rpmrebuild \
+            glib2-devel \
+            gobject-introspection-devel \
+            libgudev-devel \
+            gnutls-devel \
+            openssl-devel \
+            libtool \
+            python3 \
+            systemd-devel \
+            cpio \
+            findutils
+
+      - name: Fetch existing libfprint NEVRA for this Fedora
+        id: nevra
+        run: |
+          set -euo pipefail
+          v="$(dnf -q repoquery --qf '%{version}-%{release}' --whatprovides libfprint | head -1)"
+          echo "libfprint=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build RPM
+        env:
+          OUT: ${{ github.workspace }}/out
+        run: ./scripts/build-rpm.sh
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp out/dist/*.rpm dist/ 2>/dev/null || cp "$GITHUB_WORKSPACE"/dist/*.rpm dist/ || true
+          ls -l dist
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfprint-tudormoc-fc${{ matrix.version }}
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: [discover, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Attach RPMs to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.rpm
+          fail_on_unmatched_files: true

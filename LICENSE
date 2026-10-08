@@ -1,0 +1,4 @@
+Build script and CI configuration in this repository: MIT.
+
+The libfprint driver sources under patches/ are LGPL-2.1-or-later, matching
+libfprint upstream. See docs/LICENSE-NOTES.md for attribution.
