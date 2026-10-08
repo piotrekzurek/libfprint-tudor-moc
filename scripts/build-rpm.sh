@@ -80,60 +80,90 @@ log "applying driver patch"
 # ------------------------------------------------------- register the driver
 
 log "registering the driver in the build"
-for f in libfprint/meson.build meson.build; do
-  [[ -f $SRC/$f ]] && { echo "would edit $f"; }
-done
-
-# The driver needs GnuTLS. Wire the helper dependency in the same way the
-# upstream driver list expects, and drop the sources into driver_sources.
 python3 - "$SRC" <<'PY'
-import re, sys, pathlib
+import pathlib
+import re
+import sys
+
 src = pathlib.Path(sys.argv[1])
 
-# --- libfprint/meson.build: add sources + gnutls helper entry
-p = src / "libfprint" / "meson.build"
-s = p.read_text()
-if "syna_tudor_moc" not in s:
-    s = s.replace(
-        "    'goodixmoc' : files(",
-        "    'syna_tudor_moc' : files(\n"
-        "        'drivers/syna_tudor_moc/syna_tudor_moc.c',\n"
-        "        'drivers/syna_tudor_moc/container.c',\n"
-        "        'drivers/syna_tudor_moc/pairing_data.c',\n"
-        "        'drivers/syna_tudor_moc/utils.c',\n"
-        "        'drivers/syna_tudor_moc/communication.c',\n"
-        "        'drivers/syna_tudor_moc/tls.c',\n"
-        "    ),\n"
-        "    'goodixmoc' : files(",
-        1)
-    s = s.replace(
-        "    'openssl': files(),",
-        "    'openssl': files(),\n    'gnutls': files(),",
-        1)
-    p.write_text(s)
-    print("  libfprint/meson.build: registered driver")
+# Keep the Meson integration explicit and deterministic so GitHub Actions does
+# not emit noisy warnings from a partially edited build file.
+def ensure_contains(path: pathlib.Path, needle: str, description: str) -> None:
+    text = path.read_text()
+    if needle not in text:
+        raise SystemExit(f"{description}: missing expected text in {path}")
 
-# --- top meson.build: declare gnutls helper + dependency
+# libfprint/meson.build
+p = src / "libfprint" / "meson.build"
+if p.exists():
+    text = p.read_text()
+    replaced = False
+    if "'syna_tudor_moc' : files(" not in text:
+        marker = "    'goodixmoc' : files("
+        if marker not in text:
+            raise SystemExit(f"Could not find driver insertion point in {p}")
+        text = text.replace(
+            marker,
+            "    'syna_tudor_moc' : files(\n"
+            "        'drivers/syna_tudor_moc/syna_tudor_moc.c',\n"
+            "        'drivers/syna_tudor_moc/container.c',\n"
+            "        'drivers/syna_tudor_moc/pairing_data.c',\n"
+            "        'drivers/syna_tudor_moc/utils.c',\n"
+            "        'drivers/syna_tudor_moc/communication.c',\n"
+            "        'drivers/syna_tudor_moc/tls.c',\n"
+            "    ),\n"
+            "    'goodixmoc' : files(",
+            1,
+        )
+        replaced = True
+    if "'gnutls': files()" not in text:
+        marker = "    'openssl': files(),"
+        if marker not in text:
+            raise SystemExit(f"Could not find openssl dependency block in {p}")
+        text = text.replace(marker, "    'openssl': files(),\n    'gnutls': files(),", 1)
+        replaced = True
+    if replaced:
+        p.write_text(text)
+    ensure_contains(p, "'syna_tudor_moc' : files(", "driver registration")
+    ensure_contains(p, "'gnutls': files()", "GnuTLS helper registration")
+
+# top-level meson.build
 p = src / "meson.build"
-s = p.read_text()
-if "'gnutls'" not in s:
-    s = s.replace(
-        "    'synaptics': {},",
-        "    'synaptics': {},\n    'syna_tudor_moc': { 'helper': ['gnutls'] },",
-        1)
-    s = s.replace(
-        "        optional_deps += openssl_dep",
-        "        optional_deps += openssl_dep\n"
-        "    elif i == 'gnutls'\n"
-        "        gnutls_dep = dependency('gnutls', version: '>= 3.6', required: false)\n"
-        "        if not gnutls_dep.found()\n"
-        "            error('GnuTLS is required for @0@'.format(driver))\n"
-        "        endif\n"
-        "        libfprint_conf.set10('HAVE_GNUTLS', true)\n"
-        "        optional_deps += gnutls_dep",
-        1)
-    p.write_text(s)
-    print("  meson.build: gnutls helper declared")
+if p.exists():
+    text = p.read_text()
+    replaced = False
+    if "'syna_tudor_moc': { 'helper': ['gnutls'] }" not in text:
+        marker = "    'synaptics': {},"
+        if marker not in text:
+            raise SystemExit(f"Could not find synaptics block in {p}")
+        text = text.replace(
+            marker,
+            "    'synaptics': {},\n    'syna_tudor_moc': { 'helper': ['gnutls'] },",
+            1,
+        )
+        replaced = True
+    if "elif i == 'gnutls'" not in text:
+        marker = "        optional_deps += openssl_dep"
+        if marker not in text:
+            raise SystemExit(f"Could not find optional dependency block in {p}")
+        text = text.replace(
+            marker,
+            "        optional_deps += openssl_dep\n"
+            "    elif i == 'gnutls'\n"
+            "        gnutls_dep = dependency('gnutls', version: '>= 3.6', required: false)\n"
+            "        if not gnutls_dep.found()\n"
+            "            error('GnuTLS is required for @0@'.format(driver))\n"
+            "        endif\n"
+            "        libfprint_conf.set10('HAVE_GNUTLS', true)\n"
+            "        optional_deps += gnutls_dep",
+            1,
+        )
+        replaced = True
+    if replaced:
+        p.write_text(text)
+    ensure_contains(p, "'syna_tudor_moc': { 'helper': ['gnutls'] }", "Meson helper registration")
+    ensure_contains(p, "elif i == 'gnutls'", "GNUTLS dependency block")
 PY
 
 # --------------------------------------------------------------- bump release
