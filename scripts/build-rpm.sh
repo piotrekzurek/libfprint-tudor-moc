@@ -191,9 +191,9 @@ rpmbuild --define "_topdir $BUILDROOT" \
 RPM="$(find "$BUILDROOT" -name 'libfprint-*.x86_64.rpm' -print -quit)"
 [[ -n $RPM ]] || die "no RPM produced"
 
-mkdir -p "$HERE/dist"
-cp "$RPM" "$HERE/dist/"
-log "built $HERE/dist/$(basename "$RPM")"
+mkdir -p "$OUT/dist"
+cp "$RPM" "$OUT/dist/"
+log "built $OUT/dist/$(basename "$RPM")"
 
 cat <<EOF
 
