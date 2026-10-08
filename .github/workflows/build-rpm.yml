@@ -55,7 +55,8 @@ jobs:
             python3 \
             systemd-devel \
             cpio \
-            findutils
+            findutils \
+            patch
 
       - name: Detect Fedora version
         id: detect
