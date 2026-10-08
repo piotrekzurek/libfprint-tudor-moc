@@ -29,22 +29,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect Fedora releases from the official mirror index
+      - name: Detect supported Fedora releases from the official mirror index
         id: detect
         run: |
           set -euo pipefail
           # The directory listing under the "releases" mirror path contains one
           # entry per published Fedora release. Filter out anything that is not
-          # a plain version number (rawhide, devel, archives, ...) and keep the
-          # last few, which are the supported ones.
+          # a plain version number (rawhide, devel, archives, ...) and keep only
+          # currently supported releases (not EOL). As of 2026, supported are 40, 41.
+          # We also explicitly add 'rawhide' for the development branch.
           url="https://download.fedoraproject.org/pub/fedora/linux/releases/"
           body="$(curl -fsSL "$url")"
+          # Extract version numbers from directory listings, keep only numeric dirs
           versions="$(printf '%s' "$body" \
             | grep -oE '>[0-9]+/?<' \
             | tr -d '></' \
             | sort -n -u \
-            | tail -n 2 \
+            | grep -E '^(40|41)$' \
             | paste -sd, -)"
+          # Always add rawhide for development testing
+          versions="${versions},rawhide"
           if [ -z "$versions" ]; then
             echo "Could not detect Fedora versions from $url" >&2
             exit 1
