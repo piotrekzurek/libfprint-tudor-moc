@@ -56,7 +56,8 @@ jobs:
             systemd-devel \
             cpio \
             findutils \
-            patch
+            patch \
+            libfprint
 
       - name: Detect Fedora version
         id: detect
@@ -83,7 +84,7 @@ jobs:
         env:
           OUT: ${{ github.workspace }}/out
         run: |
-          ./scripts/build-rpm.sh
+          bash -x ./scripts/build-rpm.sh
           # Find and output the built RPM path
           rpm_path=$(find "$OUT/dist" -name "libfprint-*.x86_64.rpm" -print -quit)
           echo "rpm-path=$rpm_path" >> "$GITHUB_OUTPUT"

@@ -27,7 +27,11 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 FEDORA_VER="$(rpm -E %fedora || true)"
 [[ -n $FEDORA_VER ]] || die "cannot detect Fedora version (rpm -E %fedora)"
 
-LIBFPRINT_VER="$(rpm -q --qf '%{version}-%{release}' libfprint)"
+# Try to get libfprint version from installed package first, fallback to repo query
+LIBFPRINT_VER="$(rpm -q --qf '%{version}-%{release}' libfprint 2>/dev/null || \
+                dnf repoquery --qf '%{version}-%{release}' --latest-limit=1 libfprint 2>/dev/null | head -1)"
+[[ -n $LIBFPRINT_VER ]] || die "cannot determine libfprint version (not installed and not in repos)"
+
 log "host: Fedora $FEDORA_VER, libfprint $LIBFPRINT_VER"
 
 command -v dnf >/dev/null || die "dnf not found"
