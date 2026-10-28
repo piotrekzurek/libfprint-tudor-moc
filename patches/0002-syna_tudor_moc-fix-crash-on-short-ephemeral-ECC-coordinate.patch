@@ -1,0 +1,84 @@
+syna_tudor_moc: fix crash on short ephemeral ECC coordinate
+
+append_client_key_exchange_to_record() computed
+`guint x_offset = x.size - ECC_KEY_SIZE`. gnutls exports each coordinate as a
+minimal big-endian integer, so about 1 handshake in 300 a coordinate comes back
+shorter than 32 bytes, the offset wraps to 0xffffffff, and the copy reads ~4 GiB
+past the buffer: fprintd segfaults while opening the device.
+
+Export without the sign byte (GNUTLS_EXPORT_FLAG_NO_LZ) and left-pad each
+coordinate to ECC_KEY_SIZE instead. Also initialise x/y so an early gnutls
+failure no longer frees uninitialised pointers.
+
+--- a/libfprint/drivers/syna_tudor_moc/tls.c
++++ b/libfprint/drivers/syna_tudor_moc/tls.c
+@@ -1093,6 +1093,8 @@
+     FpiByteWriter *writer, const gnutls_privkey_t *privkey, GError **error)
+ {
+    gboolean ret = TRUE;
++   gnutls_datum_t x = {.data = NULL};
++   gnutls_datum_t y = {.data = NULL};
+ 
+    /* add header */
+    ret &= fpi_byte_writer_put_uint8(writer, HS_CLIENT_KEY_EXCHANGE);
+@@ -1107,11 +1109,22 @@
+    GNUTLS_CHECK(gnutls_pubkey_import_privkey(pubkey, *privkey,
+                                              GNUTLS_KEY_DIGITAL_SIGNATURE, 0));
+ 
+-   gnutls_datum_t x;
+-   gnutls_datum_t y;
+-   GNUTLS_CHECK(gnutls_pubkey_export_ecc_raw(pubkey, NULL, &x, &y));
++   /* The coordinates are exported as minimal big-endian integers, so they are
++    * shorter than ECC_KEY_SIZE whenever their top byte is zero (1 in 256).
++    * Drop the sign byte and left-pad to the fixed size below instead. */
++   GNUTLS_CHECK(gnutls_pubkey_export_ecc_raw2(pubkey, NULL, &x, &y,
++                                              GNUTLS_EXPORT_FLAG_NO_LZ));
+    gnutls_pubkey_deinit(pubkey);
+ 
++   if (x.size > ECC_KEY_SIZE || y.size > ECC_KEY_SIZE) {
++      FP_ERR_FANCY("Unexpected ephemeral key size: x=%u y=%u", x.size,
++                   y.size);
++      *error = set_and_report_error(FP_DEVICE_ERROR_PROTO,
++                                    "Unexpected ephemeral key size");
++      ret = FALSE;
++      goto error;
++   }
++
+ #ifdef TLS_DEBUG
+    fp_dbg("exported pubkey");
+    fp_dbg("\tx");
+@@ -1121,30 +1134,11 @@
+ #endif
+ 
+    /* uncompressed format */
+-   guint x_offset = x.size - ECC_KEY_SIZE;
+-   guint y_offset = y.size - ECC_KEY_SIZE;
+-
+-#ifdef TLS_DEBUG
+-   if (x_offset != 0) {
+-      fp_dbg("x point data before:");
+-      fp_dbg_large_hex(x.data, x.size);
+-      fp_dbg("x point data after:");
+-      fp_dbg_large_hex(x.data + x_offset, ECC_KEY_SIZE);
+-      fp_dbg("");
+-   }
+-   if (y_offset != 0) {
+-      fp_dbg("y size if %d > ECC_KEY_SIZE -> offset = %d", y.size, y_offset);
+-      fp_dbg("y point data before:");
+-      fp_dbg_large_hex(y.data, y.size);
+-      fp_dbg("y point data after:");
+-      fp_dbg_large_hex(y.data + y_offset, ECC_KEY_SIZE);
+-      fp_dbg("");
+-   }
+-#endif
+-
+    ret &= fpi_byte_writer_put_uint8(writer, 0x4);
+-   ret &= fpi_byte_writer_put_data(writer, x.data + x_offset, ECC_KEY_SIZE);
+-   ret &= fpi_byte_writer_put_data(writer, y.data + y_offset, ECC_KEY_SIZE);
++   ret &= fpi_byte_writer_fill(writer, 0, ECC_KEY_SIZE - x.size);
++   ret &= fpi_byte_writer_put_data(writer, x.data, x.size);
++   ret &= fpi_byte_writer_fill(writer, 0, ECC_KEY_SIZE - y.size);
++   ret &= fpi_byte_writer_put_data(writer, y.data, y.size);
+ 
+ error:
+    if (x.data != NULL) {

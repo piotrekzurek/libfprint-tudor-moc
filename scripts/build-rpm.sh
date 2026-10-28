@@ -77,8 +77,10 @@ if [[ ! -d $DRIVERDIR ]]; then
 fi
 [[ -d $DRIVERDIR ]] || die "syna_tudor_moc driver not found in the source tree"
 
-log "applying driver patch"
+log "applying driver patches"
 ( cd "$SRC" && patch -p1 --forward --batch < "$HERE/patches/0001-syna_tudor_moc-add-HP-Spectre-x360-13-aw2xxx-support.patch" ) \
+  || die "patch application failed"
+( cd "$SRC" && patch -p1 --forward --batch < "$HERE/patches/0002-syna_tudor_moc-fix-crash-on-short-ephemeral-ECC-coordinate.patch" ) \
   || die "patch application failed"
 
 # ------------------------------------------------------- register the driver
